@@ -9,10 +9,12 @@
  * CORS, rate limiting, and environment validation.
  */
 
-require('dotenv').config();
-const express = require('express');
-const cors = require('cors');
-const rateLimit = require('express-rate-limit');
+import dotenv from 'dotenv';
+dotenv.config();
+
+import express from 'express';
+import cors from 'cors';
+import rateLimit from 'express-rate-limit';
 
 // ===== Environment Validation =====
 const REQUIRED_ENV = ['NVIDIA_API_KEY'];
@@ -326,8 +328,8 @@ function normalizeAnswers(parsed, questions) {
 }
 
 // ===== Start Server =====
-app.listen(PORT, () => {
-  console.log(`\n🚀 AI Study Assistant Backend v2.0 running on http://localhost:${PORT}`);
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`\n🚀 AI Study Assistant Backend v2.0 running on port ${PORT}`);
   console.log(`   Primary model : ${PRIMARY_MODEL}`);
   console.log(`   Fallback model: ${FALLBACK_MODEL}`);
   console.log(`   Timeout       : ${REQUEST_TIMEOUT_MS / 1000}s`);
