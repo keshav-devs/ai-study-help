@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI Study Assistant</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="popup-container">
+    <!-- Header -->
+    <div class="popup-header">
+      <div class="logo-area">
+        <div class="logo-icon">🎓</div>
+        <h1>AI Study Assistant</h1>
+      </div>
+      <span class="version">v1.0</span>
+    </div>
+
+    <!-- Status Card -->
+    <div class="status-card" id="statusCard">
+      <div class="status-indicator">
+        <span class="status-dot" id="statusDot"></span>
+        <span class="status-text" id="statusText">Inactive</span>
+      </div>
+      <div class="detected-mode" id="detectedMode">
+        <span class="mode-label">Mode:</span>
+        <span class="mode-value" id="modeValue">—</span>
+      </div>
+    </div>
+
+    <!-- Controls -->
+    <div class="controls">
+      <button class="btn btn-start" id="btnStart">
+        <span class="btn-icon">▶</span>
+        Start Automation
+      </button>
+      <button class="btn btn-stop" id="btnStop" disabled>
+        <span class="btn-icon">■</span>
+        Stop Automation
+      </button>
+    </div>
+
+    <!-- Quick Info -->
+    <div class="info-bar">
+      <div class="info-item">
+        <span class="info-icon">🎬</span>
+        <span>Video 3x</span>
+      </div>
+      <div class="info-item">
+        <span class="info-icon">📄</span>
+        <span>Slides Nav</span>
+      </div>
+      <div class="info-item">
+        <span class="info-icon">🧠</span>
+        <span>Quiz AI</span>
+      </div>
+    </div>
+
+    <!-- Footer -->
+    <div class="popup-footer">
+      <a href="#" id="openOptions">⚙ Settings</a>
+    </div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
