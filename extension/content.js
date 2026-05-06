@@ -1,23 +1,39 @@
 /**
- * content.js — Main Content Script
- * Handles video speed, slides helper, quiz detection, sidebar injection.
- * Debug logs prefixed with [AI-SA] for easy filtering in DevTools.
+ * content.js — Main Content Script (MutationObserver Architecture)
+ *
+ * Replaces the old setInterval-based detection with a robust observer
+ * architecture designed for dynamic SPAs like Infosys Springboard.
+ *
+ * Architecture:
+ *   1. MutationObserver watches for DOM changes (throttled)
+ *   2. SPA route change detector (popstate + URL polling)
+ *   3. Video element watcher (new videos, source changes)
+ *   4. Duplicate injection guards
+ *
+ * Debug logs prefixed with [AI-SA] — filter in DevTools Console.
  */
 (() => {
   'use strict';
+
+  // ===== Debug Logger =====
   const DEBUG = true;
   const log = (...args) => { if (DEBUG) console.log('[AI-SA]', ...args); };
   const warn = (...args) => { if (DEBUG) console.warn('[AI-SA]', ...args); };
 
+  // ===== State =====
   let isActive = false;
   let currentMode = 'none';
   let speedInterval = null;
-  let detectionInterval = null;
-  let nextButtonObserver = null;
   let floatingHelper = null;
   let sidebarInjected = false;
   let currentSpeed = 3;
   let extractedQuestions = [];
+
+  // Observer references (for cleanup)
+  let domObserver = null;
+  let routeCheckInterval = null;
+  let lastUrl = location.href;
+  let scanScheduled = false;
 
   // ===== Message Listener =====
   chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
@@ -26,16 +42,25 @@
     return true;
   });
 
+  // ===== Start / Stop =====
+
   function startAutomation() {
     if (isActive) return;
     isActive = true;
     log('▶ Automation STARTED');
+
     chrome.storage.sync.get({ playbackSpeed: 3 }, (s) => {
       currentSpeed = s.playbackSpeed;
       log('⚙ Speed preference:', currentSpeed + 'x');
-      runDetection();
+
+      // Initial scan
+      runDetection('initial');
+
+      // Start the observer architecture
+      startDOMObserver();
+      startRouteWatcher();
     });
-    detectionInterval = setInterval(() => { if (isActive) runDetection(); }, 3000);
+
     document.addEventListener('keydown', handleHotkey);
     notify('Automation started — scanning page...');
   }
@@ -44,78 +69,274 @@
     isActive = false;
     currentMode = 'none';
     log('■ Automation STOPPED');
+
+    // Tear down observers
+    stopDOMObserver();
+    stopRouteWatcher();
+
     if (speedInterval) { clearInterval(speedInterval); speedInterval = null; }
-    if (detectionInterval) { clearInterval(detectionInterval); detectionInterval = null; }
     removeFloatingHelper();
     removeSidebar();
     sidebarInjected = false;
-    if (nextButtonObserver) { nextButtonObserver.disconnect(); nextButtonObserver = null; }
     document.removeEventListener('keydown', handleHotkey);
     reportMode('none');
     notify('Automation stopped.');
   }
 
-  // ===== Detection =====
-  function runDetection() {
-    if (StudyUtils.detectQuiz()) {
-      if (currentMode !== 'quiz') { log('🧠 Quiz DETECTED'); currentMode = 'quiz'; reportMode('quiz'); handleQuizMode(); notify('Quiz detected — AI assistant ready'); }
-    } else if (StudyUtils.detectVideo()) {
-      if (currentMode !== 'video') { log('🎬 Video DETECTED'); currentMode = 'video'; reportMode('video'); handleVideoMode(); notify('Video speed set to ' + currentSpeed + 'x'); }
-    } else if (StudyUtils.detectNextButton()) {
-      if (currentMode !== 'slides') { log('📄 Slides DETECTED (Next button found)'); currentMode = 'slides'; reportMode('slides'); handleSlidesMode(); }
+  // ═══════════════════════════════════════════════════
+  //  CORE: MutationObserver Architecture
+  // ═══════════════════════════════════════════════════
+
+  /**
+   * Start the MutationObserver on document.body.
+   * Uses a throttled callback to avoid hammering detection
+   * on rapid DOM changes (React re-renders, Angular digests, etc.)
+   */
+  function startDOMObserver() {
+    if (domObserver) return;
+
+    const throttledScan = StudyUtils.throttle(() => {
+      if (!isActive) return;
+      runDetection('mutation');
+    }, 1500); // max 1 scan per 1.5 seconds
+
+    domObserver = new MutationObserver((mutations) => {
+      if (!isActive) return;
+
+      // Quick relevance check — skip mutations from our own sidebar/helper
+      const isRelevant = mutations.some(m => {
+        const target = m.target;
+        if (target.id === 'ai-study-sidebar' || target.id === 'ai-study-floating-helper') return false;
+        if (target.closest?.('#ai-study-sidebar')) return false;
+        return true;
+      });
+
+      if (isRelevant) {
+        scheduleDetection(throttledScan);
+      }
+    });
+
+    // Observe body subtree for childList + attribute changes on key properties
+    const observeTarget = document.body || document.documentElement;
+    domObserver.observe(observeTarget, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ['disabled', 'style', 'class', 'src', 'hidden', 'aria-hidden']
+    });
+
+    log('👁 MutationObserver STARTED');
+  }
+
+  function stopDOMObserver() {
+    if (domObserver) {
+      domObserver.disconnect();
+      domObserver = null;
+      log('👁 MutationObserver STOPPED');
     }
   }
 
-  function reportMode(mode) { chrome.runtime.sendMessage({ type: 'MODE_DETECTED', mode }); }
+  /**
+   * Schedule detection using requestAnimationFrame to batch
+   * multiple synchronous mutations into a single scan.
+   */
+  function scheduleDetection(throttledScan) {
+    if (scanScheduled) return;
+    scanScheduled = true;
+    requestAnimationFrame(() => {
+      scanScheduled = false;
+      throttledScan();
+    });
+  }
 
-  // ===== Video Mode =====
+  // ═══════════════════════════════════════════════════
+  //  SPA Route Change Detector
+  // ═══════════════════════════════════════════════════
+
+  function startRouteWatcher() {
+    // Listen for popstate (back/forward navigation)
+    window.addEventListener('popstate', handleRouteChange);
+
+    // Poll URL for pushState/replaceState changes (SPA frameworks)
+    routeCheckInterval = setInterval(() => {
+      if (location.href !== lastUrl) {
+        lastUrl = location.href;
+        handleRouteChange();
+      }
+    }, 1000);
+
+    log('🔗 Route watcher STARTED');
+  }
+
+  function stopRouteWatcher() {
+    window.removeEventListener('popstate', handleRouteChange);
+    if (routeCheckInterval) {
+      clearInterval(routeCheckInterval);
+      routeCheckInterval = null;
+    }
+    log('🔗 Route watcher STOPPED');
+  }
+
+  function handleRouteChange() {
+    if (!isActive) return;
+    log('🔀 Route changed:', location.pathname);
+
+    // Reset mode — new page content is loading
+    currentMode = 'none';
+    reportMode('none');
+
+    // Remove old UI elements (new page, new content)
+    removeFloatingHelper();
+    if (speedInterval) { clearInterval(speedInterval); speedInterval = null; }
+
+    // Wait for new content to render, then scan
+    setTimeout(() => runDetection('route-change'), 1500);
+    setTimeout(() => runDetection('route-change-delayed'), 4000);
+  }
+
+  // ═══════════════════════════════════════════════════
+  //  Detection Engine
+  // ═══════════════════════════════════════════════════
+
+  function runDetection(trigger = 'unknown') {
+    if (!isActive) return;
+
+    // Priority: Quiz > Video > Slides
+    if (StudyUtils.detectQuiz()) {
+      if (currentMode !== 'quiz') {
+        log(`🧠 Quiz DETECTED [trigger: ${trigger}]`);
+        currentMode = 'quiz';
+        reportMode('quiz');
+        handleQuizMode();
+        notify('Quiz detected — AI assistant ready');
+      } else {
+        // Re-extract if quiz content may have changed
+        if (trigger === 'route-change' || trigger === 'route-change-delayed') {
+          handleQuizMode();
+        }
+      }
+    } else if (StudyUtils.detectVideo()) {
+      if (currentMode !== 'video') {
+        log(`🎬 Video DETECTED [trigger: ${trigger}]`);
+        currentMode = 'video';
+        reportMode('video');
+        handleVideoMode();
+        notify('Video speed set to ' + currentSpeed + 'x');
+      }
+    } else if (StudyUtils.detectNextButton()) {
+      if (currentMode !== 'slides') {
+        log(`📄 Slides DETECTED — Next button found [trigger: ${trigger}]`);
+        currentMode = 'slides';
+        reportMode('slides');
+        handleSlidesMode();
+      }
+    }
+  }
+
+  function reportMode(mode) {
+    try { chrome.runtime.sendMessage({ type: 'MODE_DETECTED', mode }); } catch { /* extension context invalidated */ }
+  }
+
+  // ═══════════════════════════════════════════════════
+  //  Mode Handlers
+  // ═══════════════════════════════════════════════════
+
+  // ----- Video Mode -----
   function handleVideoMode() {
+    log('🎬 Applying speed:', currentSpeed + 'x');
     applyVideoSpeed();
     if (speedInterval) clearInterval(speedInterval);
-    speedInterval = setInterval(applyVideoSpeed, 1500);
+    // Re-apply periodically (some players reset playback rate)
+    speedInterval = setInterval(applyVideoSpeed, 2000);
   }
 
   function applyVideoSpeed() {
-    document.querySelectorAll('video').forEach(v => { if (v.playbackRate !== currentSpeed) v.playbackRate = currentSpeed; });
+    let applied = 0;
+    document.querySelectorAll('video').forEach(v => {
+      if (v.playbackRate !== currentSpeed) {
+        v.playbackRate = currentSpeed;
+        applied++;
+      }
+    });
+
+    // Also try same-origin iframes
+    try {
+      document.querySelectorAll('iframe').forEach(iframe => {
+        try {
+          iframe.contentDocument?.querySelectorAll('video').forEach(v => {
+            if (v.playbackRate !== currentSpeed) {
+              v.playbackRate = currentSpeed;
+              applied++;
+            }
+          });
+        } catch { /* cross-origin */ }
+      });
+    } catch { /* safety */ }
+
+    if (applied > 0) log(`⏩ Speed applied to ${applied} video(s): ${currentSpeed}x`);
   }
 
-  // ===== Slides Mode =====
+  // ----- Slides Mode -----
   function handleSlidesMode() {
     showFloatingHelper();
-    if (nextButtonObserver) nextButtonObserver.disconnect();
-    nextButtonObserver = new MutationObserver(StudyUtils.debounce(() => {
-      StudyUtils.detectNextButton() ? showFloatingHelper() : removeFloatingHelper();
-    }, 500));
-    nextButtonObserver.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['disabled', 'style', 'class'] });
   }
 
   function showFloatingHelper() {
+    if (document.getElementById('ai-study-floating-helper')) return; // duplicate guard
     if (floatingHelper) return;
+    log('📌 Injecting floating Next helper');
+
     floatingHelper = document.createElement('div');
     floatingHelper.id = 'ai-study-floating-helper';
     floatingHelper.innerHTML = '<button id="ai-study-next-btn">Next ▶</button>';
     Object.assign(floatingHelper.style, { position: 'fixed', bottom: '24px', right: '24px', zIndex: '2147483646' });
     document.body.appendChild(floatingHelper);
+
     const btn = floatingHelper.querySelector('#ai-study-next-btn');
-    Object.assign(btn.style, { padding: '12px 24px', background: 'linear-gradient(135deg,#6366f1,#8b5cf6)', color: '#fff', border: 'none', borderRadius: '50px', fontSize: '14px', fontWeight: '700', cursor: 'pointer', boxShadow: '0 4px 20px rgba(99,102,241,0.4)', transition: 'all 0.2s ease' });
+    Object.assign(btn.style, {
+      padding: '12px 24px',
+      background: 'linear-gradient(135deg,#6366f1,#8b5cf6)',
+      color: '#fff', border: 'none', borderRadius: '50px',
+      fontSize: '14px', fontWeight: '700', cursor: 'pointer',
+      boxShadow: '0 4px 20px rgba(99,102,241,0.4)',
+      transition: 'all 0.2s ease'
+    });
     btn.onmouseenter = () => { btn.style.transform = 'translateY(-2px) scale(1.05)'; };
     btn.onmouseleave = () => { btn.style.transform = 'none'; };
-    btn.onclick = () => { const nb = StudyUtils.detectNextButton(); if (nb) nb.click(); };
+    btn.onclick = () => {
+      const nb = StudyUtils.detectNextButton();
+      if (nb) { log('➡ Next button clicked via helper'); nb.click(); }
+    };
   }
 
-  function removeFloatingHelper() { if (floatingHelper) { floatingHelper.remove(); floatingHelper = null; } }
+  function removeFloatingHelper() {
+    if (floatingHelper) { floatingHelper.remove(); floatingHelper = null; }
+    // Also remove orphaned helpers (safety)
+    const orphan = document.getElementById('ai-study-floating-helper');
+    if (orphan) orphan.remove();
+  }
 
-  // ===== Quiz Mode =====
+  // ----- Quiz Mode -----
   function handleQuizMode() {
     extractedQuestions = StudyUtils.extractQuestions();
     log('📋 Extracted', extractedQuestions.length, 'questions');
-    if (extractedQuestions.length === 0) { warn('No questions found on page'); return; }
+    if (extractedQuestions.length === 0) { warn('No questions found on page — retrying in 3s'); setTimeout(() => { if (isActive && currentMode === 'quiz') handleQuizMode(); }, 3000); return; }
     injectSidebar(extractedQuestions);
   }
 
-  // ===== Sidebar =====
+  // ═══════════════════════════════════════════════════
+  //  Sidebar
+  // ═══════════════════════════════════════════════════
+
   function injectSidebar(questions) {
-    if (sidebarInjected) { log('🔄 Updating existing sidebar'); updateSidebarQuestions(questions); return; }
+    // Duplicate injection guard
+    if (document.getElementById('ai-study-sidebar')) {
+      log('🔄 Sidebar exists — updating content');
+      updateSidebarQuestions(questions);
+      sidebarInjected = true;
+      return;
+    }
+
     log('📌 Injecting AI sidebar with', questions.length, 'questions');
     sidebarInjected = true;
     const sb = document.createElement('div');
@@ -161,7 +382,11 @@
         });
         log('✅ Received', (resp.answers || []).length, 'answers from', resp.modelUsed || 'unknown model');
         displayAnswers(sb, resp.answers || [], resp.modelUsed || '');
-      } catch(e) { warn('❌ Backend error:', e.message); this.textContent = '❌ Error — Retry'; this.disabled = false; }
+      } catch(e) {
+        warn('❌ Backend error:', e.message);
+        this.textContent = '❌ Error — Retry';
+        this.disabled = false;
+      }
     };
   }
 
@@ -186,13 +411,19 @@
       }
       if (act) {
         act.style.display = 'flex';
-        act.querySelector('.ai-btn-copy').onclick = () => navigator.clipboard.writeText(a.answer || '');
-        act.querySelector('.ai-btn-fill').onclick = () => StudyUtils.fillAnswer(i, a.answer || '', extractedQuestions);
+        act.querySelector('.ai-btn-copy').onclick = () => { navigator.clipboard.writeText(a.answer || ''); log('📋 Copied answer', i+1); };
+        act.querySelector('.ai-btn-fill').onclick = () => { StudyUtils.fillAnswer(i, a.answer || '', extractedQuestions); log('✏️ Filled answer', i+1); };
       }
     });
     const fillAll = sb.querySelector('#ai-fill-all');
     const getBtn = sb.querySelector('#ai-get-answers');
-    if (fillAll) { fillAll.style.display = 'block'; fillAll.onclick = () => answers.forEach((a, i) => StudyUtils.fillAnswer(i, a.answer || '', extractedQuestions)); }
+    if (fillAll) {
+      fillAll.style.display = 'block';
+      fillAll.onclick = () => {
+        log('⚡ Filling ALL answers');
+        answers.forEach((a, i) => StudyUtils.fillAnswer(i, a.answer || '', extractedQuestions));
+      };
+    }
     if (getBtn) { getBtn.textContent = '🤖 Refresh Answers'; getBtn.disabled = false; }
   }
 
@@ -203,10 +434,13 @@
 
   function removeSidebar() {
     const sb = document.getElementById('ai-study-sidebar');
-    if (sb) { sb.remove(); document.body.style.marginRight = '0'; sidebarInjected = false; }
+    if (sb) { sb.remove(); document.body.style.marginRight = '0'; sidebarInjected = false; log('🗑 Sidebar removed'); }
   }
 
-  // ===== Hotkeys =====
+  // ═══════════════════════════════════════════════════
+  //  Hotkeys & Utilities
+  // ═══════════════════════════════════════════════════
+
   function handleHotkey(e) {
     if (!isActive || ['INPUT','TEXTAREA','SELECT'].includes(e.target.tagName)) return;
     if (e.key === '1') { currentSpeed = 1; applyVideoSpeed(); notify('Speed: 1x'); }
@@ -214,6 +448,12 @@
     if (e.key === '3') { currentSpeed = 3; applyVideoSpeed(); notify('Speed: 3x'); }
   }
 
-  function notify(text) { chrome.runtime.sendMessage({ type: 'SHOW_NOTIFICATION', text }); }
+  function notify(text) {
+    try { chrome.runtime.sendMessage({ type: 'SHOW_NOTIFICATION', text }); } catch { /* context invalidated */ }
+  }
+
   function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+
+  // ===== Initialization Log =====
+  log('📦 Content script loaded on', location.hostname, '— waiting for automation start');
 })();

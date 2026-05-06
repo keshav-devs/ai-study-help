@@ -1,14 +1,17 @@
 /**
- * utils.js — Shared utility functions for the content script
- * 
- * Handles question extraction, autofill logic, and DOM helpers.
+ * utils.js — Detection Utilities & DOM Helpers for AI Study Assistant
+ *
+ * Redesigned for dynamic SPA websites like Infosys Springboard:
+ *   - Targeted selectors instead of full-DOM scans
+ *   - Platform-specific detection patterns
+ *   - Efficient option extraction without body.innerText
+ *   - Fuzzy matching for autofill
  */
 
 const StudyUtils = (() => {
 
-  /**
-   * Debounce helper — prevents rapid re-firing of detection functions
-   */
+  // ===== Throttle / Debounce =====
+
   function debounce(fn, delay = 1500) {
     let timer;
     return (...args) => {
@@ -17,96 +20,278 @@ const StudyUtils = (() => {
     };
   }
 
-  /**
-   * Detect HTML5 video elements on the page
-   */
-  function detectVideo() {
-    return document.querySelector('video');
+  function throttle(fn, limit = 1000) {
+    let inThrottle = false;
+    return (...args) => {
+      if (inThrottle) return;
+      inThrottle = true;
+      fn(...args);
+      setTimeout(() => { inThrottle = false; }, limit);
+    };
   }
 
-  /**
-   * Detect "Next" navigation buttons using common selectors
-   */
-  function detectNextButton() {
-    const selectors = [
-      'button.next',
-      '.next-btn',
-      '[aria-label="Next"]',
-      'button[title*="Next"]',
-      'a.next',
-      '.next-button',
-      '[data-action="next"]',
-      'button:not([disabled])'
+  // ===== Video Detection =====
+  // Finds <video> elements including those inside shadow DOM or iframes (same-origin)
+
+  function detectVideo() {
+    // Direct video elements
+    const video = document.querySelector('video');
+    if (video && video.readyState >= 0) return video;
+
+    // Videos inside common player wrappers
+    const playerSelectors = [
+      '.video-js video',
+      '.plyr video',
+      '[data-player] video',
+      '.jwplayer video',
+      '.vjs-tech',
+      '#player video',
+      '.video-player video',
+      '[class*="player"] video',
+      '[class*="video"] video',
+      'iframe + video',
+      // Infosys Springboard patterns
+      '.course-player video',
+      '.learning-player video',
+      '.content-area video',
+      '[class*="media"] video'
     ];
 
-    for (const sel of selectors) {
-      const elements = document.querySelectorAll(sel);
-      for (const el of elements) {
-        const text = el.textContent.trim().toLowerCase();
-        if (
-          sel !== 'button:not([disabled])' ||
-          text.includes('next') ||
-          text.includes('continue') ||
-          text.includes('proceed')
-        ) {
-          if (!el.disabled && el.offsetParent !== null) {
-            return el;
-          }
-        }
-      }
+    for (const sel of playerSelectors) {
+      try {
+        const el = document.querySelector(sel);
+        if (el) return el;
+      } catch { /* invalid selector — skip */ }
     }
+
+    // Check same-origin iframes
+    try {
+      const iframes = document.querySelectorAll('iframe');
+      for (const iframe of iframes) {
+        try {
+          const iframeVideo = iframe.contentDocument?.querySelector('video');
+          if (iframeVideo) return iframeVideo;
+        } catch { /* cross-origin — skip */ }
+      }
+    } catch { /* safety net */ }
+
     return null;
   }
 
-  /**
-   * Detect if the current page contains a quiz / assessment
-   * Checks for quiz-related keywords and form elements
-   */
-  function detectQuiz() {
-    const bodyText = document.body.innerText.toLowerCase();
-    const keywords = ['quiz', 'assessment', 'question', 'submit', 'exam', 'test', 'evaluate'];
-    const hasKeywords = keywords.some(kw => bodyText.includes(kw));
+  // ===== Next Button Detection =====
+  // Expanded selectors for Infosys Springboard and common LMS platforms
 
-    const hasRadios = document.querySelectorAll('input[type="radio"]').length > 0;
-    const hasCheckboxes = document.querySelectorAll('input[type="checkbox"]').length > 0;
-    const hasTextareas = document.querySelectorAll('textarea').length > 0;
+  const NEXT_BUTTON_SELECTORS = [
+    // Explicit next buttons
+    'button.next', '.next-btn', '.next-button',
+    '[aria-label="Next"]', '[aria-label="next"]',
+    'button[title*="Next"]', 'button[title*="next"]',
+    'a.next', 'a.next-btn',
+    '[data-action="next"]', '[data-action="continue"]',
 
-    // Need at least a keyword AND some form inputs
-    return hasKeywords && (hasRadios || hasCheckboxes || hasTextareas);
+    // Infosys Springboard / LMS patterns
+    '.btn-next', '.btn-continue', '.btn-proceed',
+    '[class*="next-btn"]', '[class*="next-button"]',
+    '[class*="continue-btn"]', '[class*="proceed"]',
+    '.nav-next', '.navigation-next',
+    '.course-nav button:last-child',
+    '.pagination-next', '.page-next',
+    '[class*="nav-right"]', '[class*="forward"]',
+
+    // Icon-based next buttons (arrow icons)
+    'button[class*="arrow-right"]',
+    'button[class*="chevron-right"]',
+    'a[class*="arrow-right"]'
+  ];
+
+  // Text patterns that indicate a "next" button
+  const NEXT_TEXT_PATTERNS = /^(next|continue|proceed|go\s*to\s*next|forward|>>|›|→|▶)$/i;
+  const NEXT_TEXT_INCLUDES = ['next', 'continue', 'proceed', 'forward'];
+
+  function detectNextButton() {
+    // Phase 1: Try explicit selectors
+    for (const sel of NEXT_BUTTON_SELECTORS) {
+      try {
+        const elements = document.querySelectorAll(sel);
+        for (const el of elements) {
+          if (isClickableAndVisible(el)) return el;
+        }
+      } catch { /* invalid selector */ }
+    }
+
+    // Phase 2: Text-based search on buttons and links only (not full DOM)
+    const clickables = document.querySelectorAll('button, a[role="button"], a.btn, [role="button"]');
+    for (const el of clickables) {
+      const text = el.textContent.trim().toLowerCase();
+      if (text.length > 50) continue; // skip long-text elements
+      if (NEXT_TEXT_INCLUDES.some(kw => text.includes(kw))) {
+        if (isClickableAndVisible(el)) return el;
+      }
+    }
+
+    return null;
   }
 
-  /**
-   * Extract questions and their options from the DOM
-   * Returns structured JSON array of { question, options }
-   */
+  function isClickableAndVisible(el) {
+    if (!el) return false;
+    if (el.disabled) return false;
+    if (el.getAttribute('aria-disabled') === 'true') return false;
+    if (el.offsetParent === null && el.style.position !== 'fixed') return false;
+    if (el.closest('#ai-study-sidebar, #ai-study-floating-helper')) return false;
+    const rect = el.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  }
+
+  // ===== Quiz Detection =====
+  // Uses targeted element queries instead of body.innerText
+
+  // Quiz container selectors for various platforms
+  const QUIZ_CONTAINER_SELECTORS = [
+    // Generic quiz/assessment
+    '.quiz', '.assessment', '.exam', '.test-container',
+    '[class*="quiz"]', '[class*="assessment"]', '[class*="exam"]',
+    '[class*="question"]', '[data-type="quiz"]', '[data-type="assessment"]',
+
+    // Infosys Springboard patterns
+    '.assessment-container', '.quiz-container', '.test-section',
+    '[class*="evaluate"]', '[class*="graded"]',
+    '.question-panel', '.question-container',
+    '.questionnaire',
+
+    // Form patterns with inputs
+    'form[class*="quiz"]', 'form[class*="assessment"]', 'form[class*="test"]',
+
+    // General fieldsets with radio/checkbox
+    'fieldset'
+  ];
+
+  function detectQuiz() {
+    // Method 1: Check for known quiz container selectors
+    for (const sel of QUIZ_CONTAINER_SELECTORS) {
+      try {
+        const el = document.querySelector(sel);
+        if (el && el.offsetParent !== null) {
+          // Verify it has interactive inputs inside
+          const hasInputs = el.querySelector('input[type="radio"], input[type="checkbox"], textarea, select');
+          if (hasInputs) return true;
+        }
+      } catch { /* skip */ }
+    }
+
+    // Method 2: Count visible radio/checkbox inputs (fast — no innerText)
+    const radioCount = document.querySelectorAll('input[type="radio"]').length;
+    const checkboxCount = document.querySelectorAll('input[type="checkbox"]').length;
+    const hasFormInputs = radioCount >= 2 || checkboxCount >= 2;
+
+    if (!hasFormInputs) {
+      // Also check for textareas that look like answer fields
+      const textareas = document.querySelectorAll('textarea');
+      const answerTextareas = Array.from(textareas).filter(ta =>
+        ta.closest('[class*="question"], [class*="answer"], fieldset, .quiz, .assessment') !== null
+      );
+      if (answerTextareas.length === 0) return false;
+    }
+
+    // Method 3: Check headings and labels for quiz keywords (cheap targeted scan)
+    const headings = document.querySelectorAll('h1, h2, h3, h4, .title, [class*="title"], [class*="heading"]');
+    for (const h of headings) {
+      const text = h.textContent.toLowerCase();
+      if (/quiz|assessment|exam|test|evaluate|question/i.test(text)) {
+        return true;
+      }
+    }
+
+    // Method 4: If we have 3+ radio buttons, it's very likely a quiz
+    if (radioCount >= 3) return true;
+
+    return false;
+  }
+
+  // ===== Question Extraction =====
+  // Structured extraction from quiz containers, not random paragraphs
+
   function extractQuestions() {
     const questions = [];
     const seen = new Set();
 
-    // Collect candidate question elements
-    const questionSelectors = 'p, h1, h2, h3, h4, li, label, .question, .quiz-question, [class*="question"]';
-    const elements = document.querySelectorAll(questionSelectors);
+    // Strategy 1: Find question containers with numbered/labeled questions
+    const questionBlocks = document.querySelectorAll(
+      '.question, .quiz-question, .assessment-question, ' +
+      '[class*="question-item"], [class*="quiz-item"], [class*="q-block"], ' +
+      '[class*="question-container"], [class*="question-row"], ' +
+      '[data-question], [data-quiz-question], ' +
+      'fieldset, .form-group'
+    );
 
-    elements.forEach(el => {
-      const text = el.textContent.trim();
+    for (const block of questionBlocks) {
+      const q = extractQuestionFromBlock(block, seen);
+      if (q) questions.push(q);
+    }
 
-      // Filter: must be > 20 chars or end with '?'
-      if (text.length < 20 && !text.endsWith('?')) return;
-      if (text.length > 500) return; // too long, probably a paragraph
-      if (seen.has(text)) return;
-      seen.add(text);
+    // Strategy 2: If no structured blocks found, use proximity-based extraction
+    if (questions.length === 0) {
+      const questionEls = document.querySelectorAll(
+        'p, h3, h4, label, .question, [class*="question"], li'
+      );
 
-      // Try to find associated options (radio/checkbox labels nearby)
-      const options = extractOptionsNear(el);
+      for (const el of questionEls) {
+        // Skip elements inside our own sidebar
+        if (el.closest('#ai-study-sidebar')) continue;
 
-      questions.push({
-        question: text,
-        options: options
-      });
-    });
+        const text = el.textContent.trim();
+        if (text.length < 15 || text.length > 500) continue;
+        if (seen.has(text)) continue;
 
-    // Limit to top 15 questions
+        // Must look like a question (has ? or is near inputs)
+        const hasQuestionMark = text.includes('?');
+        const nearInputs = el.parentElement?.querySelector('input[type="radio"], input[type="checkbox"], textarea') !== null;
+
+        if (!hasQuestionMark && !nearInputs) continue;
+
+        seen.add(text);
+        const options = extractOptionsNear(el);
+        questions.push({ question: text, options });
+      }
+    }
+
     return questions.slice(0, 15);
+  }
+
+  /**
+   * Extract a question + options from a structured question block
+   */
+  function extractQuestionFromBlock(block, seen) {
+    // Skip our own sidebar elements
+    if (block.closest('#ai-study-sidebar')) return null;
+
+    // Find the question text within the block
+    let questionText = '';
+    const qTextEl = block.querySelector(
+      '.question-text, .q-text, [class*="question-text"], ' +
+      '[class*="q-title"], [class*="question-title"], ' +
+      'h3, h4, p, label, legend'
+    );
+
+    if (qTextEl) {
+      questionText = qTextEl.textContent.trim();
+    } else {
+      // Use first significant text content
+      const textNodes = [];
+      const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT, null, false);
+      let node;
+      while (node = walker.nextNode()) {
+        const t = node.textContent.trim();
+        if (t.length > 10 && t.length < 500) textNodes.push(t);
+      }
+      questionText = textNodes[0] || '';
+    }
+
+    if (questionText.length < 10 || questionText.length > 500) return null;
+    if (seen.has(questionText)) return null;
+    seen.add(questionText);
+
+    const options = extractOptionsNear(block);
+    return { question: questionText, options };
   }
 
   /**
@@ -115,7 +300,10 @@ const StudyUtils = (() => {
    */
   function extractOptionsNear(questionEl) {
     const options = [];
-    const container = questionEl.closest('.question, .quiz-item, .assessment-item, form, fieldset') || questionEl.parentElement;
+    const container = questionEl.closest(
+      '.question, .quiz-item, .assessment-item, .question-container, ' +
+      '[class*="question"], form, fieldset, .form-group'
+    ) || questionEl.parentElement;
     if (!container) return options;
 
     // Look for labeled inputs
@@ -124,33 +312,51 @@ const StudyUtils = (() => {
       let labelText = '';
 
       // Check for associated label element
-      const labelEl = container.querySelector(`label[for="${input.id}"]`);
-      if (labelEl) {
-        labelText = labelEl.textContent.trim();
-      } else {
-        // Check if input is inside a label
-        const parentLabel = input.closest('label');
-        if (parentLabel) {
-          labelText = parentLabel.textContent.trim();
-        }
+      if (input.id) {
+        const labelEl = container.querySelector(`label[for="${input.id}"]`);
+        if (labelEl) labelText = labelEl.textContent.trim();
       }
 
-      // Also check next sibling text
+      if (!labelText) {
+        // Check if input is inside a label
+        const parentLabel = input.closest('label');
+        if (parentLabel) labelText = parentLabel.textContent.trim();
+      }
+
+      // Check next sibling text
       if (!labelText && input.nextSibling) {
         labelText = input.nextSibling.textContent?.trim() || '';
       }
 
-      if (labelText && !options.includes(labelText)) {
+      // Check next element sibling
+      if (!labelText && input.nextElementSibling) {
+        labelText = input.nextElementSibling.textContent?.trim() || '';
+      }
+
+      // Check parent's text (for spans wrapping option text)
+      if (!labelText) {
+        const parent = input.parentElement;
+        if (parent && parent.tagName !== 'FORM' && parent.tagName !== 'FIELDSET') {
+          const clone = parent.cloneNode(true);
+          clone.querySelectorAll('input').forEach(i => i.remove());
+          labelText = clone.textContent.trim();
+        }
+      }
+
+      if (labelText && labelText.length < 300 && !options.includes(labelText)) {
         options.push(labelText);
       }
     });
 
-    // If no radio/checkbox options, check for list items
+    // If no radio/checkbox options, check for list items or option divs
     if (options.length === 0) {
-      const listItems = container.querySelectorAll('li, .option, [class*="option"], [class*="choice"]');
+      const listItems = container.querySelectorAll(
+        'li, .option, [class*="option"], [class*="choice"], [class*="answer-option"]'
+      );
       listItems.forEach(li => {
+        if (li.closest('#ai-study-sidebar')) return;
         const text = li.textContent.trim();
-        if (text.length > 0 && text.length < 200) {
+        if (text.length > 0 && text.length < 300 && !options.includes(text)) {
           options.push(text);
         }
       });
@@ -159,10 +365,8 @@ const StudyUtils = (() => {
     return options;
   }
 
-  /**
-   * Autofill a single answer into the page
-   * Matches the AI answer text against available options and selects/fills the best match
-   */
+  // ===== Autofill Logic =====
+
   function fillAnswer(questionIndex, answerText, questionsData) {
     if (!questionsData || !questionsData[questionIndex]) return false;
 
@@ -172,50 +376,42 @@ const StudyUtils = (() => {
 
     // Try radio buttons first
     const radios = container.querySelectorAll('input[type="radio"]');
-    if (radios.length > 0) {
-      return fillRadio(radios, answerText, container);
-    }
+    if (radios.length > 0) return fillRadio(radios, answerText, container);
 
     // Try checkboxes
     const checkboxes = container.querySelectorAll('input[type="checkbox"]');
-    if (checkboxes.length > 0) {
-      return fillCheckbox(checkboxes, answerText, container);
-    }
+    if (checkboxes.length > 0) return fillCheckbox(checkboxes, answerText, container);
 
     // Try textarea
     const textarea = container.querySelector('textarea');
-    if (textarea) {
-      return fillTextInput(textarea, answerText);
-    }
+    if (textarea) return fillTextInput(textarea, answerText);
 
     // Try text input
     const textInput = container.querySelector('input[type="text"], input:not([type])');
-    if (textInput) {
-      return fillTextInput(textInput, answerText);
-    }
+    if (textInput) return fillTextInput(textInput, answerText);
 
     return false;
   }
 
-  /**
-   * Find the DOM container that contains a specific question text
-   */
   function findQuestionContainer(questionText) {
-    const allElements = document.querySelectorAll('p, h1, h2, h3, h4, li, label, .question, [class*="question"]');
+    const allElements = document.querySelectorAll(
+      'p, h1, h2, h3, h4, li, label, legend, ' +
+      '.question, .question-text, [class*="question"]'
+    );
     for (const el of allElements) {
+      if (el.closest('#ai-study-sidebar')) continue;
       if (el.textContent.trim() === questionText) {
-        return el.closest('.question, .quiz-item, .assessment-item, form, fieldset, div') || el.parentElement;
+        return el.closest(
+          '.question, .quiz-item, .assessment-item, .question-container, ' +
+          '[class*="question"], form, fieldset, .form-group, div'
+        ) || el.parentElement;
       }
     }
     return null;
   }
 
-  /**
-   * Fill a radio button by matching answer text to option labels
-   */
   function fillRadio(radios, answerText, container) {
     const answerLower = answerText.toLowerCase().trim();
-
     for (const radio of radios) {
       const labelText = getInputLabel(radio, container).toLowerCase();
       if (labelText.includes(answerLower) || answerLower.includes(labelText) || fuzzyMatch(labelText, answerLower)) {
@@ -229,14 +425,9 @@ const StudyUtils = (() => {
     return false;
   }
 
-  /**
-   * Fill checkboxes by matching answer text to option labels
-   */
   function fillCheckbox(checkboxes, answerText, container) {
     const answerLower = answerText.toLowerCase().trim();
     let filled = false;
-
-    // Answer might contain multiple values separated by comma
     const answerParts = answerLower.split(',').map(s => s.trim());
 
     for (const cb of checkboxes) {
@@ -244,7 +435,6 @@ const StudyUtils = (() => {
       const shouldCheck = answerParts.some(part =>
         labelText.includes(part) || part.includes(labelText) || fuzzyMatch(labelText, part)
       );
-
       if (shouldCheck) {
         cb.checked = true;
         cb.dispatchEvent(new Event('change', { bubbles: true }));
@@ -255,15 +445,8 @@ const StudyUtils = (() => {
     return filled;
   }
 
-  /**
-   * Fill a text input or textarea by setting its value
-   * Simulates normal user typing events
-   */
   function fillTextInput(input, answerText) {
-    // Focus the element
     input.focus();
-
-    // Set the value using native setter to trigger React/Angular bindings
     const nativeSetter = Object.getOwnPropertyDescriptor(
       input.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype,
       'value'
@@ -275,44 +458,24 @@ const StudyUtils = (() => {
       input.value = answerText;
     }
 
-    // Dispatch events to simulate real user interaction
     input.dispatchEvent(new Event('input', { bubbles: true }));
     input.dispatchEvent(new Event('change', { bubbles: true }));
     input.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true }));
-
     return true;
   }
 
-  /**
-   * Get the label text for an input element
-   */
   function getInputLabel(input, container) {
-    // Try for= attribute
     if (input.id) {
       const label = container.querySelector(`label[for="${input.id}"]`);
       if (label) return label.textContent.trim();
     }
-
-    // Try parent label
     const parentLabel = input.closest('label');
     if (parentLabel) return parentLabel.textContent.trim();
-
-    // Try next sibling
-    if (input.nextSibling && input.nextSibling.textContent) {
-      return input.nextSibling.textContent.trim();
-    }
-
-    // Try next element sibling
-    if (input.nextElementSibling) {
-      return input.nextElementSibling.textContent.trim();
-    }
-
+    if (input.nextSibling && input.nextSibling.textContent) return input.nextSibling.textContent.trim();
+    if (input.nextElementSibling) return input.nextElementSibling.textContent.trim();
     return '';
   }
 
-  /**
-   * Simple fuzzy match: checks if strings share significant substrings
-   */
   function fuzzyMatch(str1, str2) {
     if (str1.length < 3 || str2.length < 3) return false;
     const words1 = str1.split(/\s+/);
@@ -320,9 +483,7 @@ const StudyUtils = (() => {
     let matches = 0;
     for (const w1 of words1) {
       if (w1.length < 3) continue;
-      if (words2.some(w2 => w2.includes(w1) || w1.includes(w2))) {
-        matches++;
-      }
+      if (words2.some(w2 => w2.includes(w1) || w1.includes(w2))) matches++;
     }
     return matches >= Math.min(2, words1.length);
   }
@@ -330,6 +491,7 @@ const StudyUtils = (() => {
   // Public API
   return {
     debounce,
+    throttle,
     detectVideo,
     detectNextButton,
     detectQuiz,
