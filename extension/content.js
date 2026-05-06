@@ -1,9 +1,13 @@
 /**
  * content.js — Main Content Script
  * Handles video speed, slides helper, quiz detection, sidebar injection.
+ * Debug logs prefixed with [AI-SA] for easy filtering in DevTools.
  */
 (() => {
   'use strict';
+  const DEBUG = true;
+  const log = (...args) => { if (DEBUG) console.log('[AI-SA]', ...args); };
+  const warn = (...args) => { if (DEBUG) console.warn('[AI-SA]', ...args); };
 
   let isActive = false;
   let currentMode = 'none';
@@ -25,8 +29,10 @@
   function startAutomation() {
     if (isActive) return;
     isActive = true;
+    log('▶ Automation STARTED');
     chrome.storage.sync.get({ playbackSpeed: 3 }, (s) => {
       currentSpeed = s.playbackSpeed;
+      log('⚙ Speed preference:', currentSpeed + 'x');
       runDetection();
     });
     detectionInterval = setInterval(() => { if (isActive) runDetection(); }, 3000);
@@ -37,6 +43,7 @@
   function stopAutomation() {
     isActive = false;
     currentMode = 'none';
+    log('■ Automation STOPPED');
     if (speedInterval) { clearInterval(speedInterval); speedInterval = null; }
     if (detectionInterval) { clearInterval(detectionInterval); detectionInterval = null; }
     removeFloatingHelper();
@@ -51,11 +58,11 @@
   // ===== Detection =====
   function runDetection() {
     if (StudyUtils.detectQuiz()) {
-      if (currentMode !== 'quiz') { currentMode = 'quiz'; reportMode('quiz'); handleQuizMode(); notify('Quiz detected — AI assistant ready'); }
+      if (currentMode !== 'quiz') { log('🧠 Quiz DETECTED'); currentMode = 'quiz'; reportMode('quiz'); handleQuizMode(); notify('Quiz detected — AI assistant ready'); }
     } else if (StudyUtils.detectVideo()) {
-      if (currentMode !== 'video') { currentMode = 'video'; reportMode('video'); handleVideoMode(); notify('Video speed set to ' + currentSpeed + 'x'); }
+      if (currentMode !== 'video') { log('🎬 Video DETECTED'); currentMode = 'video'; reportMode('video'); handleVideoMode(); notify('Video speed set to ' + currentSpeed + 'x'); }
     } else if (StudyUtils.detectNextButton()) {
-      if (currentMode !== 'slides') { currentMode = 'slides'; reportMode('slides'); handleSlidesMode(); }
+      if (currentMode !== 'slides') { log('📄 Slides DETECTED (Next button found)'); currentMode = 'slides'; reportMode('slides'); handleSlidesMode(); }
     }
   }
 
@@ -101,13 +108,15 @@
   // ===== Quiz Mode =====
   function handleQuizMode() {
     extractedQuestions = StudyUtils.extractQuestions();
-    if (extractedQuestions.length === 0) return;
+    log('📋 Extracted', extractedQuestions.length, 'questions');
+    if (extractedQuestions.length === 0) { warn('No questions found on page'); return; }
     injectSidebar(extractedQuestions);
   }
 
   // ===== Sidebar =====
   function injectSidebar(questions) {
-    if (sidebarInjected) { updateSidebarQuestions(questions); return; }
+    if (sidebarInjected) { log('🔄 Updating existing sidebar'); updateSidebarQuestions(questions); return; }
+    log('📌 Injecting AI sidebar with', questions.length, 'questions');
     sidebarInjected = true;
     const sb = document.createElement('div');
     sb.id = 'ai-study-sidebar';
@@ -144,13 +153,15 @@
       this.textContent = '⏳ Getting answers...';
       this.disabled = true;
       try {
+        log('🌐 Sending', questions.length, 'questions to backend...');
         const resp = await new Promise((res, rej) => {
           chrome.runtime.sendMessage({ type: 'GET_AI_ANSWERS', questions }, r => {
             r && r.success ? res(r.data) : rej(new Error(r?.error || 'Failed'));
           });
         });
+        log('✅ Received', (resp.answers || []).length, 'answers from', resp.modelUsed || 'unknown model');
         displayAnswers(sb, resp.answers || [], resp.modelUsed || '');
-      } catch(e) { this.textContent = '❌ Error — Retry'; this.disabled = false; }
+      } catch(e) { warn('❌ Backend error:', e.message); this.textContent = '❌ Error — Retry'; this.disabled = false; }
     };
   }
 

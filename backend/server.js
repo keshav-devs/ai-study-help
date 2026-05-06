@@ -164,8 +164,15 @@ app.use(cors({
   allowedHeaders: ['Content-Type']
 }));
 
-// JSON body parser
+// JSON body parser with error handling for malformed JSON
 app.use(express.json({ limit: '50kb' }));
+app.use((err, req, res, next) => {
+  if (err.type === 'entity.parse.failed') {
+    console.error('🔴 [REQ] Malformed JSON in request body');
+    return res.status(400).json({ error: 'Invalid JSON in request body.' });
+  }
+  next(err);
+});
 
 // Rate limiting — 30 requests per minute per IP
 const limiter = rateLimit({
@@ -177,15 +184,68 @@ const limiter = rateLimit({
 });
 app.use('/api/', limiter);
 
+// ===== Request Logger Middleware =====
+app.use((req, res, next) => {
+  const ts = new Date().toISOString().substring(11, 19);
+  console.log(`📨 [${ts}] ${req.method} ${req.path}`);
+  next();
+});
+
 // ===== Health Check =====
 app.get('/', (req, res) => {
   res.json({
     status: 'ok',
     service: 'AI Study Assistant Backend',
-    version: '2.0.0',
+    version: '2.1.0',
     primaryModel: PRIMARY_MODEL,
     fallbackModel: FALLBACK_MODEL,
-    cacheSize: answerCache.size
+    cacheSize: answerCache.size,
+    uptime: Math.floor(process.uptime()) + 's'
+  });
+});
+
+// ===== AI Connectivity Test: GET /test-ai =====
+// Sends a tiny prompt to NVIDIA NIM to verify the API key and model connectivity.
+app.get('/test-ai', async (req, res) => {
+  console.log('🧪 [TEST] Running AI connectivity test...');
+  const testMessages = [
+    { role: 'system', content: 'Reply with exactly: {"test":"ok"}' },
+    { role: 'user', content: 'ping' }
+  ];
+
+  const results = { primary: null, fallback: null };
+
+  // Test primary model
+  try {
+    console.log(`🧪 [TEST] Testing primary: ${PRIMARY_MODEL}`);
+    const start = Date.now();
+    const text = await generateAnswer(testMessages, PRIMARY_MODEL);
+    const ms = Date.now() - start;
+    results.primary = { status: 'ok', model: PRIMARY_MODEL, latency: ms + 'ms', response: text.substring(0, 100) };
+    console.log(`✅ [TEST] Primary OK (${ms}ms)`);
+  } catch (err) {
+    results.primary = { status: 'error', model: PRIMARY_MODEL, error: err.message };
+    console.warn(`❌ [TEST] Primary failed: ${err.message}`);
+  }
+
+  // Test fallback model
+  try {
+    console.log(`🧪 [TEST] Testing fallback: ${FALLBACK_MODEL}`);
+    const start = Date.now();
+    const text = await generateAnswer(testMessages, FALLBACK_MODEL);
+    const ms = Date.now() - start;
+    results.fallback = { status: 'ok', model: FALLBACK_MODEL, latency: ms + 'ms', response: text.substring(0, 100) };
+    console.log(`✅ [TEST] Fallback OK (${ms}ms)`);
+  } catch (err) {
+    results.fallback = { status: 'error', model: FALLBACK_MODEL, error: err.message };
+    console.warn(`❌ [TEST] Fallback failed: ${err.message}`);
+  }
+
+  const overallOk = results.primary?.status === 'ok' || results.fallback?.status === 'ok';
+  res.status(overallOk ? 200 : 503).json({
+    status: overallOk ? 'ok' : 'error',
+    message: overallOk ? 'At least one model is reachable' : 'Both models unreachable',
+    ...results
   });
 });
 
@@ -194,21 +254,33 @@ app.post('/api/answers', async (req, res) => {
   try {
     const { questions } = req.body;
 
-    // Validate input
-    if (!questions || !Array.isArray(questions) || questions.length === 0) {
-      return res.status(400).json({
-        error: 'Invalid request. Provide a "questions" array.'
-      });
+    // Validate input — missing or wrong type
+    if (!req.body || typeof req.body !== 'object') {
+      console.warn('🔴 [VAL] Empty or non-object request body');
+      return res.status(400).json({ error: 'Request body must be a JSON object.' });
+    }
+    if (!questions) {
+      console.warn('🔴 [VAL] Missing "questions" field');
+      return res.status(400).json({ error: 'Missing required field: "questions".' });
+    }
+    if (!Array.isArray(questions)) {
+      console.warn('🔴 [VAL] "questions" is not an array');
+      return res.status(400).json({ error: '"questions" must be an array.' });
+    }
+    if (questions.length === 0) {
+      console.warn('🔴 [VAL] "questions" array is empty');
+      return res.status(400).json({ error: '"questions" array must not be empty.' });
     }
 
     // Limit to 15 questions max
     const limitedQuestions = questions.slice(0, 15);
+    console.log(`📝 [API] Received ${questions.length} questions (processing ${limitedQuestions.length})`);
 
     // ---- Check cache first ----
     evictStaleCache();
     const key = cacheKey(limitedQuestions);
     if (answerCache.has(key)) {
-      console.log('📦 Cache hit — returning cached answers');
+      console.log('📦 [CACHE] Hit — returning cached answers');
       const cached = answerCache.get(key);
       return res.json({ answers: cached.answers, modelUsed: cached.modelUsed + ' (cached)' });
     }
@@ -252,6 +324,7 @@ app.post('/api/answers', async (req, res) => {
 
     // ---- Store in cache ----
     answerCache.set(key, { answers, modelUsed, timestamp: Date.now() });
+    console.log(`✅ [API] Returned ${answers.length} answers via ${modelUsed}`);
 
     res.json({ answers, modelUsed });
 

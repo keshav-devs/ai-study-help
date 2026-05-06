@@ -82,3 +82,37 @@ chrome.storage.onChanged.addListener((changes, area) => {
     }
   }
 });
+
+// ===== Backend Connection Status Badge =====
+const backendDot = document.getElementById('backendDot');
+const backendText = document.getElementById('backendText');
+
+/**
+ * Ping the backend health endpoint and update the badge.
+ * Shows: Backend Connected (green) | Backend Offline (red) | AI Ready (green+bold)
+ */
+async function checkBackendStatus() {
+  const { backendUrl } = await chrome.storage.sync.get({ backendUrl: 'http://localhost:3000' });
+
+  try {
+    const response = await fetch(backendUrl + '/', { method: 'GET', signal: AbortSignal.timeout(5000) });
+    if (!response.ok) throw new Error('Non-OK status');
+
+    const data = await response.json();
+    backendDot.className = 'backend-dot connected';
+    backendText.textContent = data.status === 'ok' ? '✅ Backend Connected' : '⚠️ Backend Degraded';
+
+    // If both models info present, show AI Ready
+    if (data.primaryModel && data.fallbackModel) {
+      backendText.textContent = '🧠 AI Ready';
+      backendDot.className = 'backend-dot ai-ready';
+    }
+  } catch (err) {
+    backendDot.className = 'backend-dot offline';
+    backendText.textContent = '❌ Backend Offline';
+  }
+}
+
+// Check on popup open, then every 15s while popup is visible
+checkBackendStatus();
+setInterval(checkBackendStatus, 15000);
